@@ -1,0 +1,155 @@
+#!/usr/bin/python3
+
+import socket
+import select
+import sys
+import threading
+import signal
+import datetime
+from struct import pack, unpack
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+
+endpoints_dict = {}
+is_active = True
+PACKET_LEN = 6
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+IP_address = socket.gethostbyname(socket.gethostname())
+IP_address = "127.0.0.2"
+Port = 8080
+
+
+serverIP = (IP_address, Port)
+
+def on_exit(a, b):
+    global is_active
+    is_active = False
+    server.close()
+    print("exit...")
+
+signal.signal(signal.SIGINT, on_exit)
+
+def output(conn, text: str):
+    if not conn:
+        user = "you"
+    else:
+        user = f"{endpoints_dict[conn][0]}:{endpoints_dict[conn][1]}"
+
+    date = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    print(f"[{date} <{user}>]:{text}")
+
+
+def init_connection(ip: str, port: int) -> int:
+    comutator = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        endpoints_dict[comutator] = (ip, port)
+        comutator.connect((ip, port))
+    except:
+        print(f"Can't connect to {ip}:{port}")
+        endpoints_dict.pop(comutator)
+        return -1
+    else:
+        init_pack = b"\x00"+socket.inet_aton(serverIP[0])+pack("!H", serverIP[1])
+        comutator.send(init_pack)
+        output(None, f"{bcolors.HEADER}{ip}:{port}{bcolors.ENDC} - online")
+        return 0
+
+
+def work_with_pack(conn: socket.socket, package: bytes):
+    if len(package)<1:
+        output(conn, f"{bcolors.BOLD}{bcolors.WARNING}disconnected{bcolors.ENDC}")
+        endpoints_dict.pop(conn)
+        return
+
+    type = package[0]
+    if(type == 0):
+        ip_tuple = (socket.inet_ntoa(package[1:5]), int.from_bytes(package[5:7],"big"))
+        endpoints_dict[conn] = ip_tuple
+        conn.send(pack_endpoints())
+        output(conn, f"{bcolors.BOLD}{bcolors.OKGREEN}connected{bcolors.ENDC}")
+    elif(type == 1):
+        count = package[1]
+        for i in range(count):
+            target_ip = socket.inet_ntoa(package[2+i*PACKET_LEN:6+i*PACKET_LEN])
+            target_port = int.from_bytes(package[6+i*PACKET_LEN:8+i*PACKET_LEN],"big")
+            if (target_ip, target_port) not in endpoints_dict.values() and (target_ip, target_port) != serverIP:
+                init_connection(target_ip, target_port)
+    elif(type == 255):
+        output(conn, package[1:].decode('utf-8'))
+    else:
+        print(package)
+
+def broadcast(message: str):
+    for conn in endpoints_dict.keys():
+        conn.send(b"\xff"+message.encode('utf-8'))
+
+
+def pack_endpoints():
+    endpt_bytes = b"\x01"+pack("!B", len(endpoints_dict.values())+1)
+    for endpoint in endpoints_dict.values():
+        endpt_bytes += socket.inet_aton(endpoint[0])
+        endpt_bytes += pack("!H", endpoint[1])
+    endpt_bytes += socket.inet_aton(serverIP[0])
+    endpt_bytes += pack("!H", serverIP[1])
+    return endpt_bytes
+
+def background_listen():
+    while is_active:
+        inputs = list(endpoints_dict.keys())
+        inputs.append(sys.stdin)
+
+        read_sockets, write_socket, error_socket = select.select(inputs, [], [], 0.05)
+
+        for input_itm in read_sockets:
+            if(input_itm == sys.stdin):
+                message = sys.stdin.readline()[:-1]
+                broadcast(message)
+                output(None, message)
+            else:
+                message = input_itm.recv(2048)
+                work_with_pack(input_itm, message)
+
+if len(sys.argv) < 2:
+    print(f"Start at default ip {IP_address}:{Port}")
+    serverIP = (IP_address, Port)
+else:
+    IP_address = str(sys.argv[1].split(":")[0])
+    Port = int(sys.argv[1].split(":")[1])
+    serverIP = (IP_address, Port)
+
+try:
+    server.bind(serverIP[0:2])
+    server.listen(10)
+except:
+    print("port is busy")
+    exit(-1)
+
+listener = threading.Thread(target=background_listen)
+listener.start()
+
+if len(sys.argv) > 2:
+    IP_address = str(sys.argv[2].split(":")[0])
+    Port = int(sys.argv[2].split(":")[1])
+    status = init_connection(IP_address, Port)
+    if(status):
+        on_exit(None, None)
+
+while is_active:
+    try:
+        conn, addr = server.accept()
+        endpoints_dict[conn] = addr
+    except OSError:
+        break
+
+listener.join()
