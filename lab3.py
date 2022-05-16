@@ -7,6 +7,7 @@ import threading
 import signal
 import datetime
 from struct import pack, unpack
+from time import sleep
 
 class bcolors:
     HEADER = '\033[95m'
@@ -21,16 +22,14 @@ class bcolors:
 
 
 endpoints_dict = {}
+ip_to_name = {}
 is_active = True
 PACKET_LEN = 6
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-IP_address = socket.gethostbyname(socket.gethostname())
-IP_address = "127.0.0.2"
-Port = 8080
-
-
-serverIP = (IP_address, Port)
+serverUPD = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+serverUPD.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+serverUPD.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
 
 def on_exit(a, b):
     global is_active
@@ -44,26 +43,34 @@ def output(conn, text: str):
     if not conn:
         user = "you"
     else:
-        user = f"{endpoints_dict[conn][0]}:{endpoints_dict[conn][1]}"
+        info = endpoints_dict[conn]
+        name = ip_to_name.get(info, "Martha")
+        user = f"{info[0]}:{info[1]}({name})"
 
     date = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     print(f"[{date} <{user}>]:{text}")
 
 
-def init_connection(ip: str, port: int) -> int:
+def init_connection(ip: str, port: int) -> int: 
     comutator = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         endpoints_dict[comutator] = (ip, port)
-        comutator.connect((ip, port))
+        comutator.connect((ip, port)) 
     except:
         print(f"Can't connect to {ip}:{port}")
         endpoints_dict.pop(comutator)
         return -1
     else:
-        init_pack = b"\x00"+socket.inet_aton(serverIP[0])+pack("!H", serverIP[1])
-        comutator.send(init_pack)
-        output(None, f"{bcolors.HEADER}{ip}:{port}{bcolors.ENDC} - online")
+        init_pack = b"\x01"+socket.inet_aton(serverIP[0])+pack("!H", serverIP[1])+pack("!B", len(Username))+Username.encode("utf-8")
+        comutator.send(init_pack + pack_endpoints())
+        output(None, f"{ip}:{port} - {bcolors.HEADER}connected{bcolors.ENDC}")
         return 0
+
+def send_upd() -> int:
+    init_pack = b"\x00"+socket.inet_aton(serverIP[0])+pack("!H", serverIP[1])+Username.encode("utf-8")
+    serverUPD.sendto(init_pack, ("<broadcast>", 5005))
+    output(None, f"{bcolors.HEADER}search for clients...{bcolors.ENDC}")
+    return 0
 
 
 def work_with_pack(conn: socket.socket, package: bytes):
@@ -73,16 +80,21 @@ def work_with_pack(conn: socket.socket, package: bytes):
         return
 
     type = package[0]
-    if(type == 0):
+    if(type == 0 and conn == serverUPD):
         ip_tuple = (socket.inet_ntoa(package[1:5]), int.from_bytes(package[5:7],"big"))
-        endpoints_dict[conn] = ip_tuple
-        conn.send(pack_endpoints())
-        output(conn, f"{bcolors.BOLD}{bcolors.OKGREEN}connected{bcolors.ENDC}")
+        ip_to_name[ip_tuple] = package[7:].decode('utf-8')
+        if(ip_tuple not in endpoints_dict.values() and ip_tuple != serverIP):
+            init_connection(*ip_tuple)
     elif(type == 1):
-        count = package[1]
+        ip_tuple = (socket.inet_ntoa(package[1:5]), int.from_bytes(package[5:7],"big"))
+        length = package[7]
+        ip_to_name[ip_tuple] = package[8:8+length].decode('utf-8')
+        endpoints_dict[conn] = ip_tuple
+        
+        count = package[8+length]
         for i in range(count):
-            target_ip = socket.inet_ntoa(package[2+i*PACKET_LEN:6+i*PACKET_LEN])
-            target_port = int.from_bytes(package[6+i*PACKET_LEN:8+i*PACKET_LEN],"big")
+            target_ip = socket.inet_ntoa(package[9+length+i*PACKET_LEN:13+length+i*PACKET_LEN])
+            target_port = int.from_bytes(package[13+length+i*PACKET_LEN:15+length+i*PACKET_LEN],"big")
             if (target_ip, target_port) not in endpoints_dict.values() and (target_ip, target_port) != serverIP:
                 init_connection(target_ip, target_port)
     elif(type == 255):
@@ -92,11 +104,14 @@ def work_with_pack(conn: socket.socket, package: bytes):
 
 def broadcast(message: str):
     for conn in endpoints_dict.keys():
-        conn.send(b"\xff"+message.encode('utf-8'))
+        try:
+            conn.send(b"\xff"+message.encode('utf-8'))
+        except:
+            endpoints_dict.pop(conn)
 
 
 def pack_endpoints():
-    endpt_bytes = b"\x01"+pack("!B", len(endpoints_dict.values())+1)
+    endpt_bytes = pack("!B", len(endpoints_dict.values())+1)
     for endpoint in endpoints_dict.values():
         endpt_bytes += socket.inet_aton(endpoint[0])
         endpt_bytes += pack("!H", endpoint[1])
@@ -108,6 +123,7 @@ def background_listen():
     while is_active:
         inputs = list(endpoints_dict.keys())
         inputs.append(sys.stdin)
+        inputs.append(serverUPD)
 
         read_sockets, write_socket, error_socket = select.select(inputs, [], [], 0.05)
 
@@ -120,30 +136,27 @@ def background_listen():
                 message = input_itm.recv(2048)
                 work_with_pack(input_itm, message)
 
-if len(sys.argv) < 2:
-    print(f"Start at default ip {IP_address}:{Port}")
-    serverIP = (IP_address, Port)
-else:
-    IP_address = str(sys.argv[1].split(":")[0])
-    Port = int(sys.argv[1].split(":")[1])
-    serverIP = (IP_address, Port)
+
+IP_address, Port = sys.argv[1].split(":")
+Port = int(Port)
+serverIP = (IP_address, Port)
+Username = sys.argv[2]
+ip_to_name[serverIP] = Username
 
 try:
-    server.bind(serverIP[0:2])
+    server.bind(serverIP)
     server.listen(10)
 except:
     print("port is busy")
-    exit(-1)
+    exit(-1)#вот тут
 
 listener = threading.Thread(target=background_listen)
 listener.start()
+serverUPD.bind(("", 5005))
 
-if len(sys.argv) > 2:
-    IP_address = str(sys.argv[2].split(":")[0])
-    Port = int(sys.argv[2].split(":")[1])
-    status = init_connection(IP_address, Port)
-    if(status):
-        on_exit(None, None)
+status = send_upd()
+if(status):
+    on_exit(None, None)
 
 while is_active:
     try:
