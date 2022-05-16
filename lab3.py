@@ -69,7 +69,7 @@ def init_connection(ip: str, port: int) -> int:
 def send_upd() -> int:
     init_pack = b"\x00"+socket.inet_aton(serverIP[0])+pack("!H", serverIP[1])+Username.encode("utf-8")
     serverUPD.sendto(init_pack, ("<broadcast>", 5005))
-    output(None, f"{bcolors.HEADER}search for clients...{bcolors.ENDC}")
+   
     return 0
 
 
